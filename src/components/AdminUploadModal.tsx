@@ -358,6 +358,7 @@ export const AdminUploadModal: React.FC<AdminUploadModalProps> = ({
         );
 
         try {
+          const pinId = `pin-${Date.now()}-${itemIndex}-${Math.random().toString(36).substr(2, 4)}`;
           const uploadRes = await fetch(apiUrl("/api/upload"), {
             method: "POST",
             headers: {
@@ -365,6 +366,7 @@ export const AdminUploadModal: React.FC<AdminUploadModalProps> = ({
               ...(token ? { Authorization: `Bearer ${token}` } : {}),
             },
             body: JSON.stringify({
+              id: pinId,
               imageBase64: item.imageBase64,
               title: item.title.trim(),
               description: item.description.trim(),
@@ -372,81 +374,39 @@ export const AdminUploadModal: React.FC<AdminUploadModalProps> = ({
               tags: item.tags,
               aspectRatio: item.aspectRatio,
               dominantColor: item.dominantColors[0],
+              featured: true,
+              aiAnalysis: {
+                aestheticVibe:
+                  item.aestheticVibe || `${item.category} Visual Study`,
+                suggestedTags: item.tags,
+                dominantColors: item.dominantColors,
+                recognizedSubjects: [item.title],
+                category: item.category,
+              },
             }),
           });
 
           if (!uploadRes.ok) {
             const errData = await uploadRes.json();
-            throw new Error(errData.error || "Cloudinary upload failed");
-          }
-
-          const uploadData = await uploadRes.json();
-          const finalUrl = uploadData.url;
-          const publicId = uploadData.publicId;
-
-          const newPinPayload: Pin = {
-            id: `pin-${Date.now()}-${itemIndex}-${Math.random().toString(36).substr(2, 4)}`,
-            title: item.title.trim(),
-            description:
-              item.description.trim() ||
-              `Educational material for ${item.category}.`,
-            imageUrl: finalUrl,
-            cloudinaryPublicId: publicId,
-            aspectRatio: item.aspectRatio,
-            category: item.category,
-            tags:
-              item.tags.length > 0
-                ? item.tags
-                : [item.category.toLowerCase().replace(/\s+/g, ""), "education"],
-            dominantColor: item.dominantColors[0] || {
-              name: "Warm Neutral",
-              hex: "#C86D51",
-            },
-            author: {
-              name: "School Admin",
-              handle: "@peterotunuya",
-              avatar:
-                "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=140&q=80",
-              role: "admin",
-            },
-            curatedByAdmin: true,
-            featured: true,
-            savedCount: 0,
-            likesCount: 0,
-            likedByUser: false,
-            createdAt: new Date().toISOString(),
-            comments: [],
-            aiAnalysis: {
-              aestheticVibe:
-                item.aestheticVibe || `${item.category} Visual Study`,
-              suggestedTags: item.tags,
-              dominantColors: item.dominantColors,
-              recognizedSubjects: [item.title],
-              category: item.category,
-            },
-          };
-
-          const saveRes = await fetch(apiUrl("/api/pins"), {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            body: JSON.stringify(newPinPayload),
-          });
-
-          if (!saveRes.ok) {
-            const saveErr = await saveRes.json();
             throw new Error(
-              saveErr.error || "Failed to save pin to MongoDB Atlas",
+              errData.error || "Image upload and database save failed",
             );
           }
 
-          publishedPins.push(await saveRes.json());
+          const savedPin = (await uploadRes.json()) as Pin;
+          if (!savedPin.id || !savedPin.imageUrl) {
+            throw new Error("The database did not return the saved image.");
+          }
+          publishedPins.push(savedPin);
           setStagedItems((prev) =>
             prev.map((staged) =>
               staged.id === item.id
-                ? { ...staged, status: "completed", cloudinaryUrl: finalUrl }
+                ? {
+                    ...staged,
+                    status: "completed",
+                    cloudinaryUrl: savedPin.imageUrl,
+                    cloudinaryPublicId: savedPin.cloudinaryPublicId,
+                  }
                 : staged,
             ),
           );

@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { Pin, ViewTab, AuthUser } from "./types";
 import { apiUrl } from "./api";
-import { INITIAL_PINS, INITIAL_CATEGORIES } from "./data/initialData";
+import { INITIAL_CATEGORIES } from "./data/initialData";
 import { Navbar } from "./components/Navbar";
 import { MasonryGrid } from "./components/MasonryGrid";
 import { PinModal } from "./components/PinModal";
@@ -33,11 +33,10 @@ import { VisualSearchModal } from "./components/VisualSearchModal";
 import { FavouritesView } from "./components/FavouritesView";
 
 export default function App() {
-  // Pins state initialized from localStorage, then synced with MongoDB Atlas
-  const [pins, setPins] = useState<Pin[]>(() => {
-    const saved = localStorage.getItem("pinspire_pins_v4");
-    return saved ? JSON.parse(saved) : INITIAL_PINS;
-  });
+  const [pins, setPins] = useState<Pin[]>([]);
+  const [isPinsLoading, setIsPinsLoading] = useState(true);
+  const [pinsLoadError, setPinsLoadError] = useState<string | null>(null);
+  const [hasLoadedPins, setHasLoadedPins] = useState(false);
 
   // Admin Auth state
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
@@ -74,10 +73,12 @@ export default function App() {
 
   const [deleteConfirmPin, setDeleteConfirmPin] = useState<Pin | null>(null);
 
-  // Sync to local storage for instant offline loading
+  // Cache only records received from the database; never use this cache as the image source.
   useEffect(() => {
-    localStorage.setItem("pinspire_pins_v4", JSON.stringify(pins));
-  }, [pins]);
+    if (hasLoadedPins) {
+      localStorage.setItem("pinspire_pins_v4", JSON.stringify(pins));
+    }
+  }, [hasLoadedPins, pins]);
 
   // Toast trigger helper
   const showToast = (title: string, message: string) => {
@@ -88,29 +89,54 @@ export default function App() {
     }, 3200);
   };
 
-  // Fetch pins from MongoDB Atlas on mount
+  // Fetch pins from MongoDB on mount; do not fall back to local or Cloudinary-only records.
   useEffect(() => {
     const fetchPins = async () => {
       try {
         const res = await fetch(apiUrl("/api/pins"));
-        if (res.ok) {
-          const mongoPins = await res.json();
-          if (Array.isArray(mongoPins)) {
-            // Preserve user's local favourite flags
-            setPins((prev) => {
-              const favMap = new Set(
-                prev.filter((p) => p.isFavourite).map((p) => p.id),
-              );
-              return mongoPins.map((mp: Pin) => ({
-                ...mp,
-                id: mp.id || (mp as any)._id,
-                isFavourite: favMap.has(mp.id || (mp as any)._id),
-              }));
-            });
-          }
+        const mongoPins = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(
+            mongoPins?.error || "Could not load images from the database.",
+          );
         }
+        if (!Array.isArray(mongoPins)) {
+          throw new Error("The database returned an invalid image library.");
+        }
+
+        let cachedPins: Pin[] = [];
+        try {
+          const cached = localStorage.getItem("pinspire_pins_v4");
+          const parsed = cached ? JSON.parse(cached) : [];
+          if (Array.isArray(parsed)) cachedPins = parsed;
+        } catch (error) {
+          console.warn("Could not read cached favourite flags:", error);
+        }
+
+        const favouriteIds = new Set(
+          cachedPins.filter((pin) => pin.isFavourite).map((pin) => pin.id),
+        );
+        setPins(
+          mongoPins.map((pin: Pin) => {
+            const id = pin.id || pin._id || "";
+            return {
+              ...pin,
+              id,
+              isFavourite: favouriteIds.has(id),
+            };
+          }),
+        );
+        setPinsLoadError(null);
+        setHasLoadedPins(true);
       } catch (err) {
         console.warn("Could not fetch latest pins from MongoDB Atlas:", err);
+        setPinsLoadError(
+          err instanceof Error
+            ? err.message
+            : "Could not load images from the database.",
+        );
+      } finally {
+        setIsPinsLoading(false);
       }
     };
 
@@ -204,6 +230,7 @@ export default function App() {
         return p;
       }),
     );
+    setHasLoadedPins(true);
 
     const pin = pins.find((p) => p.id === pinId);
     if (nowFavourited) {
@@ -531,16 +558,29 @@ export default function App() {
               </div>
             )}
             {/* Masonry Pin Grid - Zero Detail Below Images */}
-            <MasonryGrid
-              pins={filteredPins}
-              onSelectPin={(pin) => setSelectedPinForModal(pin)}
-              onToggleFavourite={handleToggleFavourite}
-              onOpenVisualSearchWithPin={(pin) => {
-                setVisualSearchSeedPin(pin);
-                setIsVisualSearchOpen(true);
-              }}
-              onOpenShare={(pin) => setSharingPin(pin)}
-            />
+            {isPinsLoading ? (
+              <div className="py-24 text-center text-sm font-medium text-stone-500">
+                Loading images from the database...
+              </div>
+            ) : pinsLoadError ? (
+              <div
+                role="alert"
+                className="mx-auto my-12 max-w-xl rounded-2xl border border-rose-200 bg-rose-50 p-5 text-center text-sm text-rose-800"
+              >
+                Could not load images from the database: {pinsLoadError}
+              </div>
+            ) : (
+              <MasonryGrid
+                pins={filteredPins}
+                onSelectPin={(pin) => setSelectedPinForModal(pin)}
+                onToggleFavourite={handleToggleFavourite}
+                onOpenVisualSearchWithPin={(pin) => {
+                  setVisualSearchSeedPin(pin);
+                  setIsVisualSearchOpen(true);
+                }}
+                onOpenShare={(pin) => setSharingPin(pin)}
+              />
+            )}
           </div>
         ) : (
           <FavouritesView
@@ -589,6 +629,8 @@ export default function App() {
           adminToken={authUser?.token}
           onClose={() => setIsAdminUploadOpen(false)}
           onPublishPin={(newPin) => {
+            setPinsLoadError(null);
+            setHasLoadedPins(true);
             setPins((prev) => [newPin, ...prev]);
             showToast(
               "Published",
@@ -596,6 +638,8 @@ export default function App() {
             );
           }}
           onPublishBatch={(newPins) => {
+            setPinsLoadError(null);
+            setHasLoadedPins(true);
             setPins((prev) => [...newPins, ...prev]);
             showToast(
               "Batch Upload Successful",
